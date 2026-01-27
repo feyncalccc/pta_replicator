@@ -10,6 +10,191 @@ from pta_replicator.red_noise import add_gwb
 
 from numba import njit, prange
 
+def add_cgw_breath(
+    psr,
+    gwtheta,
+    gwphi,
+    mc,
+    dist,
+    fgw,
+    phase0,
+    psi,
+    inc,
+    bamp,
+    bphase,
+    pdist=1.0,
+    pphase=None,
+    psrTerm=True,
+    evolve=True,
+    phase_approx=False,
+    tref=0,
+    signal_name='cw_breath',
+):
+    """
+    Function to add CW residuals (adapted from libstempo.toasim) with the breathing mode in addition to the GR modes
+
+    :param psr: pulsar object
+    :param gwtheta: Polar angle of GW source in celestial coords [radians]
+    :param gwphi: Azimuthal angle of GW source in celestial coords [radians]
+    :param mc: Chirp mass of SMBHB [solar masses]
+    :param dist: Luminosity distance to SMBHB [Mpc]
+    :param fgw: Frequency of GW (twice the orbital frequency) [Hz]
+    :param phase0: Initial Phase of GW source [radians]
+    :param psi: Polarization of GW source [radians]
+    :param inc: Inclination of GW source [radians]
+    :param pdist: Pulsar distance to use other than those in psr [kpc]
+    :param pphase: Use pulsar phase to determine distance [radian]
+    :param psrTerm: Option to include pulsar term [boolean]
+    :param evolve: Option to exclude evolution [boolean]
+    :param tref: Fidicuial time at which initial parameters are referenced
+    """
+
+    # convert units
+    mc *= SOLAR2S  # convert from solar masses to seconds
+    dist *= MPC2S  # convert from Mpc to seconds
+
+    # define initial orbital frequency
+    w0 = np.pi * fgw
+    phase0 /= 2  # orbital phase
+    w053 = w0 ** (-5 / 3)
+
+    # define variable for later use
+    cosgwtheta, cosgwphi = np.cos(gwtheta), np.cos(gwphi)
+    singwtheta, singwphi = np.sin(gwtheta), np.sin(gwphi)
+    sin2psi, cos2psi = np.sin(2 * psi), np.cos(2 * psi)
+    incfac1, incfac2 = 0.5 * (3 + np.cos(2 * inc)), 2 * np.cos(inc)
+
+    # unit vectors to GW source
+    m = np.array([singwphi, -cosgwphi, 0.0])
+    n = np.array([-cosgwtheta * cosgwphi, -cosgwtheta * singwphi, singwtheta])
+    omhat = np.array([-singwtheta * cosgwphi, -singwtheta * singwphi, -cosgwtheta])
+
+    # various factors invloving GW parameters
+    fac1 = 256 / 5 * mc ** (5 / 3) * w0 ** (8 / 3)
+    fac2 = 1 / 32 / mc ** (5 / 3)
+    fac3 = mc ** (5 / 3) / dist
+
+    # pulsar location
+    if "RAJ" and "DECJ" in psr.loc.keys():
+        ptheta = np.pi / 2 - psr.loc["DECJ"]*np.pi/180.0
+        pphi = psr.loc["RAJ"]*np.pi/12.0
+    elif "ELONG" and "ELAT" in psr.loc.keys():
+        fac = 1.0#180.0 / np.pi #no need in pint
+        if "B" in psr.name:
+            epoch = "1950"
+        else:
+            epoch = "2000"
+        coords = ephem.Equatorial(ephem.Ecliptic(str(psr.loc["ELONG"] * fac), str(psr.loc["ELAT"] * fac)), epoch=epoch)
+
+        ptheta = np.pi / 2 - float(repr(coords.dec))
+        pphi = float(repr(coords.ra))
+
+    # use definition from Sesana et al 2010 and Ellis et al 2012
+    phat = np.array([np.sin(ptheta) * np.cos(pphi), np.sin(ptheta) * np.sin(pphi), np.cos(ptheta)])
+
+    fplus = 0.5 * (np.dot(m, phat) ** 2 - np.dot(n, phat) ** 2) / (1 + np.dot(omhat, phat))
+    fcross = (np.dot(m, phat) * np.dot(n, phat)) / (1 + np.dot(omhat, phat))
+    fbreath = 0.5 * (1 - np.dot(omhat, phat)**2) / (1 + np.dot(omhat, phat))
+    cosMu = -np.dot(omhat, phat)
+
+    # get values from pulsar object
+    toas = psr.toas.get_mjds().value * 86400 - tref
+    if pphase is not None:
+        pd = pphase / (2 * np.pi * fgw * (1 - cosMu)) / KPC2S
+    else:
+        pd = pdist
+
+    # convert units
+    pd *= KPC2S  # convert from kpc to seconds
+
+    # get pulsar time
+    tp = toas - pd * (1 - cosMu)
+
+    # evolution
+    if evolve:
+
+        # calculate time dependent frequency at earth and pulsar
+        omega = w0 * (1 - fac1 * toas) ** (-3 / 8)
+        omega_p = w0 * (1 - fac1 * tp) ** (-3 / 8)
+
+        # calculate time dependent phase
+        phase = phase0 + fac2 * (w053 - omega ** (-5 / 3))
+        phase_p = phase0 + fac2 * (w053 - omega_p ** (-5 / 3))
+
+    # use approximation that frequency does not evlolve over observation time
+    elif phase_approx:
+
+        # frequencies
+        omega = w0
+        omega_p = w0 * (1 + fac1 * pd * (1 - cosMu)) ** (-3 / 8)
+
+        # phases
+        phase = phase0 + omega * toas
+        phase_p = phase0 + fac2 * (w053 - omega_p ** (-5 / 3)) + omega_p * toas
+
+    # no evolution
+    else:
+
+        # monochromatic
+        omega = w0
+        omega_p = omega
+
+        # phases
+        phase = phase0 + omega * toas
+        phase_p = phase0 + omega * tp
+
+    # define time dependent coefficients
+    At = np.sin(2 * phase) * incfac1
+    Bt = np.cos(2 * phase) * incfac2
+    Ct = np.cos(2 * phase + bphase) * bamp
+    At_p = np.sin(2 * phase_p) * incfac1
+    Bt_p = np.cos(2 * phase_p) * incfac2
+    Ct_p = np.cos(2 * phase_p + bphase) * bamp
+    
+
+    # now define time dependent amplitudes
+    alpha = fac3 / omega ** (1 / 3)
+    alpha_p = fac3 / omega_p ** (1 / 3)
+
+    # define rplus and rcross
+    rplus = alpha * (At * cos2psi + Bt * sin2psi)
+    rcross = alpha * (-At * sin2psi + Bt * cos2psi)
+    rbreath = alpha * (Ct * cos2psi + Ct * sin2psi)
+    rplus_p = alpha_p * (At_p * cos2psi + Bt_p * sin2psi)
+    rcross_p = alpha_p * (-At_p * sin2psi + Bt_p * cos2psi)
+    rbreath_p = alpha_p * (Ct_p * cos2psi + Ct_p * sin2psi)
+
+    # residuals
+    if psrTerm:
+        res = fplus * (rplus_p - rplus) + fcross * (rcross_p - rcross) + fbreath * (rbreath_p - rbreath)
+    else:
+        res = -fplus * rplus - fcross * rcross - fbreath * rbreath
+
+    dt = res * u.s
+    
+    psr.update_added_signals('{}_'.format(psr.name)+signal_name,
+                             {'gwtheta': gwtheta,
+                              'gwphi':gwphi,
+                              'mc':mc,
+                              'dist':dist,
+                              'fgw':fgw,
+                              'phase0':phase0,
+                              'psi':psi,
+                              'inc':inc,
+                              'bamp':bamp,
+                              'bphase':bphase,
+                              'pdist':pdist,
+                              'pphase':pphase,
+                              'psrTerm':psrTerm,
+                              'evolve':evolve,
+                              'phase_approx':phase_approx,
+                              'tref':tref},
+                             dt)
+    
+    psr.toas.adjust_TOAs(TimeDelta(dt.to('day')))
+    psr.update_residuals()
+
+
 def add_cgw(
     psr,
     gwtheta,
