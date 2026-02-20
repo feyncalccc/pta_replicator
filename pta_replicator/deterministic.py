@@ -146,10 +146,10 @@ def add_cgw_breath(
     # define time dependent coefficients
     At = np.sin(2 * phase) * incfac1
     Bt = np.cos(2 * phase) * incfac2
-    Ct = np.cos(2 * phase + bphase) * bamp
+    Ct = np.sin(2 * phase + bphase) * bamp
     At_p = np.sin(2 * phase_p) * incfac1
     Bt_p = np.cos(2 * phase_p) * incfac2
-    Ct_p = np.cos(2 * phase_p + bphase) * bamp
+    Ct_p = np.sin(2 * phase_p + bphase) * bamp
     
 
     # now define time dependent amplitudes
@@ -159,10 +159,10 @@ def add_cgw_breath(
     # define rplus and rcross
     rplus = alpha * (At * cos2psi + Bt * sin2psi)
     rcross = alpha * (-At * sin2psi + Bt * cos2psi)
-    rbreath = alpha * (Ct * cos2psi + Ct * sin2psi)
+    rbreath = alpha * Ct 
     rplus_p = alpha_p * (At_p * cos2psi + Bt_p * sin2psi)
     rcross_p = alpha_p * (-At_p * sin2psi + Bt_p * cos2psi)
-    rbreath_p = alpha_p * (Ct_p * cos2psi + Ct_p * sin2psi)
+    rbreath_p = alpha_p * Ct_p
 
     # residuals
     if psrTerm:
